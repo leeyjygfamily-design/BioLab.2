@@ -581,6 +581,7 @@ if "variant_result" in st.session_state:
                "ClinVar 연동은 참조 서열과 변이 좌표의 정확한 매칭이 필요해 이번 버전에서 제외했습니다.")
 
 
+
 # ==================== AI 생명공학교사 연결 ====================
 st.divider()
 st.subheader("⑤ AI 생명공학교사 연동")
@@ -677,35 +678,47 @@ if st.button(
             "ORF 탐색은 정방향 3개 읽기 틀만 분석한 예측 결과입니다.",
             "변이 분석은 국소 정렬이며 정렬되지 않은 양 끝은 비교에서 제외될 수 있습니다.",
             "예측 단백질 영향은 실험적 검증이나 임상적 판정을 의미하지 않습니다.",
-            "ORF 번호는 현재 기준 DNA에서 프로그램이 발견한 순서에 따라 부여한 번호이며, 화면에 표시되는 ORF 번호와 동일합니다.",
+            "ORF 번호는 프로그램에서 발견한 순서에 따른 번호이며 화면에 표시되는 번호와 동일합니다.",
         ],
     }
 
-    # -------------------- ORF 분석 결과 --------------------
+    # -------------------- 전체 ORF 분석 결과 --------------------
     all_orfs = st.session_state.get("orfs")
 
     if all_orfs is not None:
         dna_result["ORF 분석"] = {
             "발견된_ORF_수": len(all_orfs),
 
-            # ORF 고유번호 추가
-            "ORF_목록_최대_30개": [
+            # 개수 제한 없이 모든 ORF의 기본 정보 전달
+            "전체_ORF_목록": [
                 {
                     "ORF_번호": i + 1,
                     "읽기틀": o["frame"],
-                    "시작": o["start"],
-                    "끝": o["end"],
+                    "시작_bp": o["start"],
+                    "끝_bp": o["end"],
                     "길이_bp": len(o["dna"]),
-                    "예측_아미노산_앞부분": o["protein"][:120],
+                    "아미노산_길이_aa": max(
+                        0, len(o["protein"]) - 1
+                    ),
                 }
-                for i, o in enumerate(all_orfs[:30])
+                for i, o in enumerate(all_orfs)
             ],
 
-            "목록_일부_생략": len(all_orfs) > 30,
-            "좌표_기준": "기준 DNA의 1-based 좌표, 시작과 끝 포함",
+            "좌표_기준": (
+                "기준 DNA의 1-based 좌표이며 "
+                "시작과 끝 위치를 모두 포함합니다."
+            ),
+            "번호_기준": (
+                "ORF 번호는 발견 순서에 따라 부여되며 "
+                "화면의 정렬 순서와 관계없이 유지됩니다."
+            ),
+            "목록_설명": (
+                "발견된 모든 ORF의 기본 정보가 포함되어 있습니다. "
+                "각 ORF의 전체 아미노산 서열은 포함하지 않습니다."
+            ),
         }
 
-        # 사용자가 선택한 ORF 정보
+        # -------------------- 사용자가 선택한 ORF --------------------
         current_orf = st.session_state.get("selected_orf")
 
         if current_orf is not None:
@@ -726,13 +739,16 @@ if st.button(
                     else None
                 ),
                 "읽기틀": current_orf["frame"],
-                "시작": current_orf["start"],
-                "끝": current_orf["end"],
+                "시작_bp": current_orf["start"],
+                "끝_bp": current_orf["end"],
                 "길이_bp": len(current_orf["dna"]),
-                "예측_아미노산_앞부분": current_orf["protein"][:300],
+                "아미노산_길이_aa": max(
+                    0, len(current_orf["protein"]) - 1
+                ),
+                "예측_아미노산_서열": current_orf["protein"],
             }
 
-    # -------------------- 서열 정렬 및 변이 분석 결과 --------------------
+    # -------------------- 서열 정렬 및 변이 분석 --------------------
     alignment = st.session_state.get("variant_result")
 
     if alignment is not None:
@@ -741,7 +757,9 @@ if st.button(
         dna_result["서열 정렬 및 변이 분석"] = {
             "기준_서열_정렬_시작": alignment["start"],
             "기준_서열_정렬_끝": alignment["end"],
-            "일치도_퍼센트": round(alignment["identity"], 4),
+            "일치도_퍼센트": round(
+                alignment["identity"], 4
+            ),
             "비교_서열_정렬_비율_퍼센트": round(
                 alignment["coverage"], 4
             ),
@@ -761,7 +779,9 @@ if st.button(
         }
 
         ranked_orfs = st.session_state.get("orfs", [])
-        selected_index = st.session_state.get("recommended_orf_choice")
+        selected_index = st.session_state.get(
+            "recommended_orf_choice"
+        )
 
         if (
             isinstance(selected_index, int)
@@ -779,20 +799,24 @@ if st.button(
 
         if protein_effect is not None:
             dna_result["선택한 ORF의 예측 단백질 영향"] = {
-                # 변이 영향 분석에 사용된 ORF 번호 및 위치 추가
                 "ORF_번호": selected_index + 1,
                 "읽기틀": effect_orf["frame"],
                 "시작_bp": effect_orf["start"],
                 "끝_bp": effect_orf["end"],
                 "길이_bp": len(effect_orf["dna"]),
-
                 "요약": protein_effect["summary"],
-                "코돈별_영향_최대_50개": protein_effect["rows"][:50],
-                "코돈별_영향_일부_생략": len(
-                    protein_effect["rows"]
-                ) > 50,
-                "기준_아미노산_앞부분": protein_effect["ref_protein"][:300],
-                "비교_아미노산_앞부분": protein_effect["alt_protein"][:300],
+                "코돈별_영향_최대_50개": (
+                    protein_effect["rows"][:50]
+                ),
+                "코돈별_영향_일부_생략": (
+                    len(protein_effect["rows"]) > 50
+                ),
+                "기준_아미노산_앞부분": (
+                    protein_effect["ref_protein"][:300]
+                ),
+                "비교_아미노산_앞부분": (
+                    protein_effect["alt_protein"][:300]
+                ),
             }
 
         elif limitation:
@@ -800,22 +824,30 @@ if st.button(
 
     # -------------------- 실제 DNA 염기서열 구간 --------------------
     if include_region:
-        selected_sequence = sequence[region_start - 1:region_end]
+        selected_sequence = sequence[
+            region_start - 1:region_end
+        ]
 
         dna_result["AI용 실제 DNA 구간"] = {
-            "좌표_기준": "현재 기준 DNA, 1-based, 시작과 끝 포함, 정방향 5′→3′",
+            "좌표_기준": (
+                "현재 기준 DNA, 1-based, "
+                "시작과 끝 포함, 정방향 5′→3′"
+            ),
             "시작_bp": int(region_start),
             "끝_bp": int(region_end),
             "길이_bp": len(selected_sequence),
             "실제_염기서열_5to3": selected_sequence,
-            "설명": "이 구간에 대해서만 실제 염기서열이 제공되었습니다. 다른 위치의 염기를 추측하지 마세요.",
+            "설명": (
+                "이 구간에 대해서만 실제 염기서열이 제공되었습니다. "
+                "다른 위치의 염기를 추측하지 마세요."
+            ),
         }
 
     # -------------------- AI 페이지로 결과 전달 --------------------
     st.session_state["dna_result"] = dna_result
 
     st.success(
-        "DNA 분석 결과를 저장했습니다. "
+        "DNA 분석 결과 및 전체 ORF 정보를 저장했습니다. "
         "AI 생명공학교사 페이지에서 확인할 수 있습니다."
     )
 
