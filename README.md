@@ -31,7 +31,7 @@
 
 아래 링크를 통해 BioLab Analyzer에 접속한다.
 
-**웹사이트:** https://biolab-analyzer.streamlit.app/
+**웹사이트:** https://biolab2.streamlit.app/AI_teacher
 
 별도의 프로그램 설치 없이 웹 브라우저에서 분석 기능을 사용할 수 있다.
 
