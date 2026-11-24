@@ -1,4 +1,5 @@
 import streamlit as st
+from common import style
 
 # 페이지 설정
 st.set_page_config(
@@ -6,6 +7,9 @@ st.set_page_config(
     page_icon="🧬",
     layout="wide"
 )
+
+style()
+home_page = st.Page("pages/0_Home.py", title="홈 · 사용 가이드", icon="🏠", default=True)
 
 # DNA 분석 페이지
 dna_page = st.Page(
@@ -31,7 +35,7 @@ pcr_page = st.Page(
 # AI 챗봇 페이지
 ai_page = st.Page(
     "pages/4_AI_teacher.py",
-    title="AI 생명공학 연구 도우미",
+    title="AI 생명공학교사",
     icon="🤖"
 )
 
@@ -39,6 +43,7 @@ ai_page = st.Page(
 pg = st.navigation(
     {
         "BioLab Analyzer": [
+            home_page,
             dna_page,
             bca_page,
             pcr_page,
