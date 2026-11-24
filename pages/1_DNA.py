@@ -8,6 +8,7 @@ from bisect import bisect_right
 from Bio.Align import PairwiseAligner
 
 st.set_page_config(page_title="DNA 분석", page_icon="🧬", layout="wide")
+st.write("DNA 페이지 실행 시작")
 
 NCBI_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 API = {"tool": "BioLabAnalyzer", "email": st.secrets["NCBI_EMAIL"], "api_key": st.secrets["NCBI_API_KEY"]}
