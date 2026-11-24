@@ -1,5 +1,6 @@
 import re
 import streamlit as st
+from common import guide, remember
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -39,7 +40,8 @@ def validate_sequence(sequence, label):
     return None
 
 
-st.title("🔬 PCR 프라이머 분석")
+st.title("PCR 프라이머 분석")
+guide("교육용 분석 결과와 한계를 확인하세요.")
 st.write("DNA 서열과 프라이머를 입력해 **GC 함량, 간이 Tm, 결합 위치 및 예상 PCR 증폭 산물**을 확인합니다.")
 with st.expander("전문 용어 도움말"):
     st.write("GC 함량: 전체 염기 중 G와 C의 비율. Tm: DNA 이중 가닥의 열적 안정성과 관련된 온도 지표. bp: 염기쌍 수, nt: 뉴클레오타이드 수.")

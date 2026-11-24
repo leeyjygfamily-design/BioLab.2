@@ -1,4 +1,5 @@
 import streamlit as st
+from common import guide, remember
 import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
@@ -317,7 +318,11 @@ def save_alignment(sample):
 
 
 # ==================== 화면 ====================
-st.title("🧬 DNA Analysis")
+st.title("DNA 분석")
+guide("기준 서열 설정 → 기본 분석 → ORF 및 변이 분석")
+with st.expander("전문 용어 도움말"):
+    st.write("GC 함량: G와 C의 비율. ORF: 번역 후보 구간. CDS: 실제 단백질 코딩 서열로 주석된 구간. SNP: 단일 염기 다형성; 이 앱의 SNP 표시는 단일 염기 치환 후보이며 집단 내 다형성을 입증하지 않습니다. Accession: 데이터베이스 등록번호.")
+    st.caption("출처: NCBI E-utilities / 정렬: Biopython PairwiseAligner 국소 정렬. ORF는 정방향 3개 읽기 틀만 탐색합니다.")
 st.write("NCBI 유전자 서열을 가져와 DNA 특성, ORF, 아미노산 및 변이를 분석합니다.")
 
 # ① NCBI 검색
@@ -360,23 +365,23 @@ def set_reference(seq, record):
     st.success("기준 서열을 설정했습니다.")
 
 st.subheader("① 기준 DNA 설정")
-mode=st.radio("입력 방식", ["유전자명 검색","Accession 검색","직접 DNA / FASTA 입력"],horizontal=True)
+mode=remember(lambda **kw: st.radio("입력 방식", ["유전자명 검색","Accession 검색","직접 DNA / FASTA 입력"], **kw), "dna_mode")
 if mode == "직접 DNA / FASTA 입력":
-    raw=st.text_area("기준 서열",height=130)
+    raw=remember(lambda **kw: st.text_area("기준 서열",height=130, **kw), "dna_raw")
     if st.button("기준 서열 적용"):
         set_reference(clean_dna(raw),{"유형":"직접 입력"})
 else:
     if mode == "유전자명 검색":
         c1,c2=st.columns(2)
-        gene=c1.text_input("유전자명",placeholder="예: TP53")
-        organism=c2.text_input("생물 종",value="Homo sapiens")
-        kind=st.selectbox("검색 대상",["전사체 우선 (mRNA)","전체 핵산 서열"])
+        gene=remember(lambda **kw: c1.text_input("유전자명",placeholder="예: TP53", **kw), "dna_gene")
+        organism=remember(lambda **kw: c2.text_input("생물 종",value="Homo sapiens", **kw), "dna_species")
+        kind=remember(lambda **kw: st.selectbox("검색 대상",["전사체 우선 (mRNA)","전체 핵산 서열"], **kw), "dna_kind")
         term=f"{gene.strip()}[Gene Name] AND {organism.strip()}[Organism]"
         if kind.startswith("전사체"):
             term += " AND biomol_mrna[PROP]"
         valid=bool(gene.strip() and organism.strip())
     else:
-        acc=st.text_input("Accession 번호",placeholder="예: NM_000546.6").strip()
+        acc=remember(lambda **kw: st.text_input("Accession 번호",placeholder="예: NM_000546.6", **kw), "dna_acc").strip()
         term=f"{acc}[Accession]"
         valid=bool(re.fullmatch(r"[A-Za-z0-9_]+(?:\.[0-9]+)?",acc))
     if st.button("NCBI에서 검색하기",type="primary",use_container_width=True):

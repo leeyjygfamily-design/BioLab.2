@@ -1,4 +1,5 @@
 import streamlit as st
+from common import guide, remember
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -355,7 +356,11 @@ def normalize_table(df, standard):
     return df
 
 # -------------------- 화면 --------------------
-st.title("🧪 BCA 단백질 정량 분석")
+st.title("BCA 단백질 정량")
+guide("표준용액과 미지 시료 입력 → 저장 및 분석 → 결과 확인")
+with st.expander("전문 용어 도움말"):
+    st.write("흡광도: 빛이 흡수된 정도. R²: 직선이 데이터 변동을 설명하는 정도. CV: 평균에 대한 표준편차의 비율. 외삽: 표준 범위 밖의 값 추정.")
+    st.caption("계산: NumPy 최소제곱 선형회귀. 입력한 측정값을 기반으로 하며 실제 단백질 추출 손실은 보정하지 않습니다.")
 st.write("표준곡선으로 단백질 농도를 계산하고, 반복 측정의 일관성과 결과 해석의 한계를 확인합니다.")
 
 with st.expander("분석 방법 및 주의사항", expanded=False):

@@ -8,8 +8,10 @@ import os
 from datetime import datetime
 
 import streamlit as st
+from common import guide, remember
 
-st.title("🤖 AI 생명공학교사")
+st.title("AI 생명공학교사")
+guide("참고 데이터 선택 → 질문 → 답변의 근거와 한계 확인")
 st.caption("DNA · BCA · PCR 분석 결과를 참고해 생명공학 개념과 실험 결과를 설명합니다.")
 
 try:
