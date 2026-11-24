@@ -41,6 +41,8 @@ def validate_sequence(sequence, label):
 
 st.title("🔬 PCR 프라이머 분석")
 st.write("DNA 서열과 프라이머를 입력해 **GC 함량, 간이 Tm, 결합 위치 및 예상 PCR 증폭 산물**을 확인합니다.")
+with st.expander("전문 용어 도움말"):
+    st.write("GC 함량: 전체 염기 중 G와 C의 비율. Tm: DNA 이중 가닥의 열적 안정성과 관련된 온도 지표. bp: 염기쌍 수, nt: 뉴클레오타이드 수.")
 st.caption("교육용 분석 도구입니다. 프라이머 결합은 완전 일치만 탐색하며, 실제 PCR 성공을 보장하지 않습니다.")
 
 # 바로 작동을 확인할 수 있도록 가상 예시 서열을 제공합니다.
@@ -53,26 +55,39 @@ with st.expander("예시 데이터 사용 방법", expanded=False):
 
 # DNA 분석 페이지에서 전달한 서열이 있다면 PCR 입력창에 반영합니다.
 # pop()을 사용해 한 번만 반영하므로, 이후 사용자가 입력값을 수정해도 유지됩니다.
+defaults = {"template": example_template, "forward": example_forward, "reverse": example_reverse}
+if "pcr_saved_inputs" not in st.session_state:
+    st.session_state["pcr_saved_inputs"] = defaults.copy()
 if "pcr_template" in st.session_state:
-    st.session_state["pcr_template_input"] = st.session_state.pop("pcr_template")
+    st.session_state["pcr_saved_inputs"] = {"template": st.session_state.pop("pcr_template"), "forward": "", "reverse": ""}
+    for key in ("template", "forward", "reverse"):
+        st.session_state.pop("_pcr_" + key, None)
+    st.session_state.pop("pcr_result", None)
+    st.session_state.pop("pcr_display_inputs", None)
+    st.info("새 DNA 데이터가 전달되었습니다. 이전 분석 결과와 입력값을 초기화했습니다.")
+for key, value in st.session_state["pcr_saved_inputs"].items():
+    if "_pcr_" + key not in st.session_state:
+        st.session_state["_pcr_" + key] = value
+st.caption("분석 버튼을 누르면 입력값이 세션에 저장됩니다. 새로고침 시에는 유지되지 않을 수 있습니다.")
 
 with st.form("pcr_analysis_form"):
     template_input = st.text_area(
         "표적 DNA 서열 (5′ → 3′)",
-        value=example_template,
-        key="pcr_template_input",
+        key="_pcr_template",
         height=140,
         help="공백과 줄바꿈은 자동 제거됩니다. A/T/G/C만 지원합니다."
     )
     left, right = st.columns(2)
     with left:
-        forward_input = st.text_input("정방향 프라이머 (5′ → 3′)", value=example_forward)
+        forward_input = st.text_input("정방향 프라이머 (5′ → 3′)", key="_pcr_forward")
     with right:
-        reverse_input = st.text_input("역방향 프라이머 (5′ → 3′)", value=example_reverse,
+        reverse_input = st.text_input("역방향 프라이머 (5′ → 3′)", key="_pcr_reverse",
                                       help="역방향 프라이머도 실제 주문하는 서열 방향인 5′ → 3′으로 입력합니다.")
-    analyze = st.form_submit_button("PCR 분석하기", type="primary", use_container_width=True)
+    analyze = st.form_submit_button("PCR 분석하기", type="primary", width="stretch")
 
 if analyze:
+    st.session_state["pcr_saved_inputs"] = {"template": template_input, "forward": forward_input, "reverse": reverse_input}
+    st.session_state.pop("pcr_display_inputs", None)
     # 이전 분석 결과가 새 입력에 섞이지 않도록 먼저 초기화합니다.
     st.session_state.pop("pcr_result", None)
     template = clean_sequence(template_input)
@@ -92,6 +107,12 @@ if analyze:
         for error in errors:
             st.error(error)
     else:
+        st.session_state["pcr_display_inputs"] = (template, forward, reverse)
+
+if "pcr_display_inputs" in st.session_state:
+    template, forward, reverse = st.session_state["pcr_display_inputs"]
+    st.caption("마지막으로 제출한 입력값의 분석 결과입니다.")
+    try:
         st.subheader("1. 프라이머 기본 특성")
         primer_info = pd.DataFrame([
             {"프라이머": "정방향", "길이 (nt)": len(forward), "GC 함량 (%)": round(gc_percent(forward), 2),
@@ -99,7 +120,7 @@ if analyze:
             {"프라이머": "역방향", "길이 (nt)": len(reverse), "GC 함량 (%)": round(gc_percent(reverse), 2),
              "간이 Tm (°C)": wallace_tm(reverse)},
         ])
-        st.dataframe(primer_info, hide_index=True, use_container_width=True)
+        st.dataframe(primer_info, hide_index=True, width="stretch")
         st.caption("Tm은 Wallace 식(2×A/T 수 + 4×G/C 수)의 단순 추정치입니다. 특히 긴 프라이머나 실제 반응 조건에서 정확한 Tm으로 사용하면 안 됩니다.")
 
         warnings = []
@@ -148,7 +169,7 @@ if analyze:
         else:
             st.success(f"예상 PCR 증폭 산물 {len(amplicons)}개를 찾았습니다.")
             st.dataframe(pd.DataFrame(amplicons).drop(columns=["_f_start", "_r_start"]),
-                         hide_index=True, use_container_width=True)
+                         hide_index=True, width="stretch")
             if len(amplicons) > 1:
                 st.warning("여러 증폭 산물이 예측됩니다. 표적 서열 안에서 결합 위치가 중복되는지 확인하세요.")
 
@@ -175,7 +196,7 @@ if analyze:
                                      hovertemplate=f"예상 길이: {amp['예상 길이 (bp)']} bp<extra></extra>"))
         fig.update_layout(title="프라이머 결합 위치와 예상 증폭 구간", xaxis_title="DNA 위치 (bp)",
                           yaxis=dict(visible=False), height=350, margin=dict(l=20, r=20, t=60, b=30))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         if len(amplicons) > 20:
             st.caption("그래프에는 앞의 20개 증폭 산물만 표시했습니다. 표에는 전체 결과가 나옵니다.")
 
@@ -239,6 +260,10 @@ if analyze:
                 "실제 PCR 증폭 성공 여부는 판단할 수 없음",
             ],
         }
+    except Exception:
+        st.session_state.pop("pcr_result", None)
+        st.session_state.pop("pcr_display_inputs", None)
+        st.error("분석 화면을 표시하지 못했습니다. 입력값을 확인하고 다시 시도해 주세요.")
 
 # 분석 버튼 클릭으로 인한 재실행 후에도 AI 이동 버튼을 유지합니다.
 if "pcr_result" in st.session_state:
@@ -246,5 +271,5 @@ if "pcr_result" in st.session_state:
     st.subheader("4. AI 생명공학교사 연동")
     st.success("PCR 분석 결과가 AI 생명공학교사에서 사용할 수 있도록 저장되었습니다.")
     st.caption("AI 페이지에서 PCR 프라이머 분석을 선택하고 질문하면 데이터가 Gemini에 전달됩니다.")
-    if st.button("🤖 PCR 결과를 AI 생명공학교사에게 보내기", use_container_width=True):
+    if st.button("🤖 PCR 결과를 AI 생명공학교사에게 보내기", width="stretch"):
         st.switch_page("pages/4_AI_teacher.py")
