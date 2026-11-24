@@ -8,7 +8,6 @@ from bisect import bisect_right
 from Bio.Align import PairwiseAligner
 
 st.set_page_config(page_title="DNA 분석", page_icon="🧬", layout="wide")
-st.write("DNA 페이지 실행 시작")
 
 NCBI_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 API = {"tool": "BioLabAnalyzer", "email": st.secrets["NCBI_EMAIL"], "api_key": st.secrets["NCBI_API_KEY"]}
@@ -95,3 +94,704 @@ def align_variants(reference, sample):
     aligner.mode = "local"
     aligner.match_score = 2
     aligner.mismatch_score = -1
+    aligner.open_gap_score = -4
+    aligner.extend_gap_score = -1
+    alignment = aligner.align(reference, sample)[0]
+    coords = alignment.coordinates
+
+    variants, mapping, insertions = [], {}, {}
+    matches = columns = 0
+    for k in range(coords.shape[1] - 1):
+        r1, r2 = map(int, coords[0, k:k+2])
+        s1, s2 = map(int, coords[1, k:k+2])
+        if r2 > r1 and s2 > s1:
+            for ri, si in zip(range(r1, r2), range(s1, s2)):
+                ref, alt = reference[ri], sample[si]
+                mapping[ri] = alt
+                columns += 1
+                if ref == alt:
+                    matches += 1
+                else:
+                    variants.append({"기준 위치": ri+1, "기준 염기": ref,
+                                     "비교 염기": alt, "유형": "SNP"})
+        elif r2 > r1:
+            for ri in range(r1, r2):
+                mapping[ri] = ""
+                columns += 1
+                variants.append({"기준 위치": ri+1, "기준 염기": reference[ri],
+                                 "비교 염기": "-", "유형": "Deletion"})
+        elif s2 > s1:
+            insertion = sample[s1:s2]
+            insertions[r1] = insertions.get(r1, "") + insertion
+            columns += len(insertion)
+            variants.append({"기준 위치": r1, "기준 염기": "-",
+                             "비교 염기": insertion, "유형": "Insertion"})
+
+    return {
+        "variants": variants, "mapping": mapping, "insertions": insertions,
+        "start": int(coords[0, 0])+1, "end": int(coords[0, -1]),
+        "identity": 100*matches/columns if columns else 0,
+        "coverage": 100*(int(coords[1, -1])-int(coords[1, 0]))/len(sample),
+        "aligned_bases": int(coords[1, -1])-int(coords[1, 0]),
+    }
+
+
+def substitution_type(ref, alt):
+    if ref == "-" or alt == "-":
+        return "-"
+    return "Transition" if (ref, alt) in {
+        ("A", "G"), ("G", "A"), ("C", "T"), ("T", "C")
+    } else "Transversion"
+
+
+def analyze_orf_effect(reference, result, orf):
+    """선택한 ORF 전체가 정렬되었을 때만 단백질 수준의 영향을 계산합니다."""
+    if not orf:
+        return None, "ORF 분석에서 ORF를 선택하면 단백질 영향도 확인할 수 있습니다."
+
+    start, end = orf["start"]-1, orf["end"]  # Python 인덱스
+    mapping, insertions = result["mapping"], result["insertions"]
+    if any(i not in mapping for i in range(start, end)):
+        relevant = [v for v in result["variants"] if start <= v["기준 위치"] <= end]
+        if any(v["유형"] != "SNP" for v in relevant):
+            return None, "부분 정렬에 삽입·결실이 포함되어 읽기 틀을 확정할 수 없습니다."
+        rows = []
+        for j in range(start, end-2, 3):
+            if not all(i in mapping and mapping[i] in ("A","T","G","C") for i in range(j,j+3)):
+                continue
+            before = reference[j:j+3]
+            after = "".join(mapping[i] for i in range(j,j+3))
+            if before == after:
+                continue
+            aa1, aa2 = translate(before), translate(after)
+            label = "Synonymous" if aa1 == aa2 else "Nonsense" if aa2 == "*" else "Stop-loss" if aa1 == "*" else "Missense"
+            rows.append({"코돈 위치(ORF 기준)": (j-start)//3+1, "기준 코돈":before,"변이 코돈":after,"기준 아미노산":aa1,"변이 아미노산":aa2,"예측 영향":label})
+        return {"rows":rows,"ref_protein":"","alt_protein":"","summary":"부분 정렬: 기준 ORF의 읽기 틀을 가정하여 완전히 정렬된 코돈의 치환만 해석했습니다. 미정렬 구간 및 전체 단백질 영향은 판단할 수 없습니다."}, None
+
+    ref_dna = reference[start:end]
+    pieces = []
+    for i in range(start, end):
+        # 삽입 위치는 기준 염기의 바로 앞(0-based 경계)
+        pieces.append(insertions.get(i, "") if i > start else "")
+        pieces.append(mapping[i])
+    alt_dna = "".join(pieces)
+
+    relevant = [v for v in result["variants"]
+                if (start+1 <= v["기준 위치"] <= end if v["유형"] != "Insertion"
+                    else start < v["기준 위치"] < end)]
+    if not relevant:
+        return {"rows": [], "ref_protein": translate(ref_dna),
+                "alt_protein": translate(alt_dna), "summary": "선택한 ORF에서 변이가 발견되지 않았습니다."}, None
+
+    indels = [v for v in relevant if v["유형"] != "SNP"]
+    net_change = len(alt_dna)-len(ref_dna)
+    if indels:
+        label = ("Frameshift 가능성 (삽입·결실의 순길이가 3의 배수가 아님)"
+                 if net_change % 3 else
+                 "In-frame 삽입·결실 가능성 (순길이가 3의 배수)")
+        return {"rows": [], "ref_protein": translate(ref_dna),
+                "alt_protein": translate(alt_dna), "summary": label,
+                "indels": True}, None
+
+    # 한 코돈에 SNP가 여러 개 있어도 최종 변이 코돈으로 함께 평가
+    rows = []
+    for codon_index in sorted({(v["기준 위치"]-1-start)//3 for v in relevant}):
+        j = codon_index*3
+        before, after = ref_dna[j:j+3], alt_dna[j:j+3]
+        aa1, aa2 = translate(before), translate(after)
+        if aa1 == aa2:
+            effect = "Synonymous (아미노산 유지)"
+        elif aa2 == "*" and aa1 != "*":
+            effect = "Nonsense (조기 종결 코돈)"
+        elif aa1 == "*" and aa2 != "*":
+            effect = "Stop-loss (종결 코돈 소실)"
+        else:
+            effect = "Missense (아미노산 치환)"
+        rows.append({"코돈 위치(ORF 기준)": codon_index+1,
+                     "기준 코돈": before, "변이 코돈": after,
+                     "기준 아미노산": aa1, "변이 아미노산": aa2,
+                     "예측 영향": effect})
+    return {"rows": rows, "ref_protein": translate(ref_dna),
+            "alt_protein": translate(alt_dna),
+            "summary": "선택한 ORF의 코돈·아미노산 변화를 분석했습니다."}, None
+
+
+def recommend_orfs(orfs, result):
+    """정렬된 기준 좌표로 ORF 전체 포함 여부와 겹침 비율을 평가합니다."""
+    covered = result["mapping"]
+    ranked = []
+    for idx, orf in enumerate(orfs):
+        start, end = orf["start"] - 1, orf["end"]
+        length = end - start
+        overlap = sum(i in covered for i in range(start, end))
+        if not overlap:
+            continue
+        fraction = overlap / length
+        ranked.append({"index": idx, "orf": orf, "fraction": fraction,
+                       "full": overlap == length, "overlap": overlap,
+                       "length_diff": abs(length - len(st.session_state.get("variant_sample", "")))})
+    ranked.sort(key=lambda x: (-int(x["full"]), -x["fraction"],
+                               -x["overlap"], x["length_diff"]))
+    return ranked
+
+
+def dna_variant_figure(reference, start, end, variants):
+    """하나의 Plotly 그래프: 드래그/휠로 확대하면 같은 DNA의 염기쌍을 자세히 확인."""
+    import math
+    # 실제 bp 단위로 그리되 브라우저 성능을 위해 최대 1500 bp만 렌더링
+    # 길면 첫 변이를 중심으로 연속 구간을 선택한다.
+    if end-start+1 > 1500:
+        center = next((v["기준 위치"] for v in variants if start <= v["기준 위치"] <= end), (start+end)//2)
+        start = max(start, min(end-1499, center-750))
+        end = start+1499
+    strand_a, strand_b = "#1499D2", "#E0B900"
+    colors = {"SNP":"#E44B55", "Deletion":"#8857CE", "Insertion":"#159A75"}
+    complement = {"A":"T","T":"A","G":"C","C":"G"}
+    bp = np.arange(start,end+1)
+    theta = 2*np.pi*(bp-start)/10.5
+    wave = np.sin(theta)
+    smooth = np.linspace(start,end,max(500,len(bp)*4))
+    smooth_wave = np.sin(2*np.pi*(smooth-start)/10.5)
+    fig = go.Figure()
+    for yy,color,name in ((smooth_wave,strand_a,"DNA 가닥 1"),(-smooth_wave,strand_b,"DNA 가닥 2")):
+        fig.add_trace(go.Scattergl(x=smooth,y=yy,mode="lines",name=name,
+                                 line=dict(color=color,width=3),hoverinfo="skip"))
+    by_pos={}
+    for v in variants:
+        by_pos.setdefault(v["기준 위치"],[]).append(v)
+    for typ,color in colors.items():
+        positions=[int(x) for x in bp if any(v["유형"]==typ for v in by_pos.get(int(x),[]))]
+        if positions:
+            fig.add_trace(go.Scatter(x=positions,y=[0]*len(positions),mode="markers",
+                                     name=typ,marker=dict(color=color,size=10,symbol="diamond"),
+                                     customdata=["; ".join(f"{v['기준 염기']}→{v['비교 염기']}" for v in by_pos[pos] if v['유형']==typ) for pos in positions],
+                                     hovertemplate="위치 %{x} bp<br>"+typ+": %{customdata}<extra></extra>"))
+    # 실제 염기쌍 간격의 가로 연결선. 확대 시 염기 글자가 자연스럽게 구분된다.
+    xs=[];ys=[]
+    for pos,y in zip(bp,wave):
+        xs.extend([pos,pos,None]);ys.extend([-y,y,None])
+    fig.add_trace(go.Scattergl(x=xs,y=ys,mode="lines",showlegend=False,
+                               line=dict(color="#B6BBC2",width=2),hoverinfo="skip"))
+    # 위·아래에 나열된 염기 문자 제거. 염기 정보는 각 위치의 hover로 확인.
+    fig.add_trace(go.Scattergl(
+        x=bp, y=np.zeros(len(bp)), mode="markers",
+        marker=dict(size=3, color="rgba(120,125,135,0.28)"),
+        customdata=[[reference[int(i)-1], complement.get(reference[int(i)-1], "?")] for i in bp],
+        hovertemplate="기준 위치 %{x} bp<br>%{customdata[0]}–%{customdata[1]}<extra></extra>",
+        showlegend=False))
+    # 드래그한 사각형의 가로·세로 범위를 모두 확대하도록 두 축의 자동 고정을 해제.
+    # 처음에는 나선이 과도하게 뭉치지 않도록 약 65 bp가 보이게 설정한다.
+    initial_end = min(end, start+64)
+    fig.update_layout(
+        height=490, dragmode="zoom", hovermode="closest",
+        margin=dict(l=15, r=15, t=40, b=50),
+        legend=dict(orientation="h", y=1.10),
+        xaxis=dict(title="기준 DNA 위치 (bp)", range=[start, initial_end],
+                   fixedrange=False, rangeslider=dict(visible=False)),
+        yaxis=dict(visible=False, range=[-1.8, 1.8], fixedrange=False,
+                   scaleanchor="x", scaleratio=1),
+        uirevision="dna-2d-zoom")
+    # x/y 실제 픽셀 비율을 강제로 고정하면 나선이 납작해질 수 있으므로
+    # scaleanchor는 사용하지 않고 두 축을 자유롭게 확대한다.
+    fig.update_yaxes(scaleanchor=None)
+    return fig
+
+
+def save_alignment(sample):
+    clear_variant()
+    reference = st.session_state.sequence
+    # 로컬 정렬은 큰 서열에서 느리거나 메모리를 많이 사용할 수 있음
+    if len(reference) > 30000 or len(sample) > 10000:
+        st.warning("현재 버전은 기준 30,000 bp, 비교 10,000 bp 이하만 지원합니다.")
+        return
+    try:
+        result = align_variants(reference, sample)
+        if result["aligned_bases"] < 12 or result["coverage"] < 50:
+            st.warning("유사한 구간이 너무 짧거나 비교 서열의 절반 미만만 정렬되었습니다. 결과를 저장하지 않았습니다.")
+            return
+        st.session_state.pop("recommended_orf_choice", None)
+        st.session_state.variant_result = result
+        st.session_state.variant_sample = sample
+    except (ValueError, IndexError, MemoryError) as e:
+        st.error(f"서열 정렬에 실패했습니다: {e}")
+
+
+# ==================== 화면 ====================
+st.title("🧬 DNA Analysis")
+st.write("NCBI 유전자 서열을 가져와 DNA 특성, ORF, 아미노산 및 변이를 분석합니다.")
+
+# ① NCBI 검색
+MAX_REFERENCE = 30000
+MAX_SAMPLE = 10000
+
+def clear_variant():
+    for key in ("variant_result", "variant_sample", "recommended_orf_choice", "dna_result"):
+        st.session_state.pop(key, None)
+
+def clear_reference():
+    clear_variant()
+    for key in ("sequence", "dna_record", "orfs", "selected_orf"):
+        st.session_state.pop(key, None)
+
+def record_type(accession, title):
+    if accession.startswith(("NM_", "XM_", "NR_", "XR_")) or "mrna" in title.lower():
+        return "전사체"
+    if accession.startswith(("NC_", "NT_", "NW_")) or "chromosome" in title.lower():
+        return "유전체/염색체"
+    return "기타 핵산 서열"
+
+def load_page(term, page, size=10):
+    ids,total = search_db("nuccore",term,size,page*size)
+    rows = []
+    for i,r in zip(ids,summaries("nuccore",ids)):
+        title=r.get("title", "정보 없음")
+        acc=r.get("accessionversion", "")
+        rows.append({"ID":i,"제목":title,"Accession":acc,"길이":int(r.get("slen") or 0),"종류":record_type(acc,title)})
+    rows.sort(key=lambda r: (r["종류"] != "전사체", r["길이"] > MAX_REFERENCE))
+    return rows,total
+
+def set_reference(seq, record):
+    clear_reference()
+    if not seq or len(seq)>MAX_REFERENCE or any(b not in "ATGC" for b in seq):
+        st.error("A/T/G/C로 구성된 단일 서열(최대 30,000 bp)을 입력해주세요. 다중 FASTA는 지원하지 않습니다.")
+        return
+    st.session_state.sequence=seq
+    st.session_state.dna_record=record
+    st.success("기준 서열을 설정했습니다.")
+
+st.subheader("① 기준 DNA 설정")
+mode=st.radio("입력 방식", ["유전자명 검색","Accession 검색","직접 DNA / FASTA 입력"],horizontal=True)
+if mode == "직접 DNA / FASTA 입력":
+    raw=st.text_area("기준 서열",height=130)
+    if st.button("기준 서열 적용"):
+        set_reference(clean_dna(raw),{"유형":"직접 입력"})
+else:
+    if mode == "유전자명 검색":
+        c1,c2=st.columns(2)
+        gene=c1.text_input("유전자명",placeholder="예: TP53")
+        organism=c2.text_input("생물 종",value="Homo sapiens")
+        kind=st.selectbox("검색 대상",["전사체 우선 (mRNA)","전체 핵산 서열"])
+        term=f"{gene.strip()}[Gene Name] AND {organism.strip()}[Organism]"
+        if kind.startswith("전사체"):
+            term += " AND biomol_mrna[PROP]"
+        valid=bool(gene.strip() and organism.strip())
+    else:
+        acc=st.text_input("Accession 번호",placeholder="예: NM_000546.6").strip()
+        term=f"{acc}[Accession]"
+        valid=bool(re.fullmatch(r"[A-Za-z0-9_]+(?:\.[0-9]+)?",acc))
+    if st.button("NCBI에서 검색하기",type="primary",use_container_width=True):
+        clear_reference()
+        for k in ("ncbi_results","ncbi_term","ncbi_total","ncbi_page"):
+            st.session_state.pop(k,None)
+        if not valid:
+            st.warning("검색 정보를 올바르게 입력해주세요.")
+        else:
+            st.session_state.ncbi_term=term
+            st.session_state.ncbi_page=0
+    if "ncbi_term" in st.session_state:
+        try:
+            page=st.session_state.ncbi_page
+            results,total=load_page(st.session_state.ncbi_term,page)
+            st.caption(f"총 {total:,}개 · {page+1} 페이지 (10개씩 조회)")
+            c1,c2=st.columns(2)
+            if c1.button("이전 검색 결과",disabled=page==0):
+                st.session_state.ncbi_page-=1; st.rerun()
+            if c2.button("다음 검색 결과",disabled=(page+1)*10>=total):
+                st.session_state.ncbi_page+=1; st.rerun()
+            if results:
+                st.dataframe(pd.DataFrame(results),hide_index=True,use_container_width=True)
+                selected=st.selectbox("분석할 서열",results,format_func=lambda x:f"{x['Accession']} | {x['제목']} | {x['길이']:,} bp")
+                if not 0<selected["길이"]<=MAX_REFERENCE:
+                    st.warning("길이가 확인되지 않거나 30,000 bp를 초과하는 기록은 다운로드하지 않습니다. 짧은 전사체를 선택해주세요.")
+                if st.button("이 서열 분석하기",disabled=not 0<selected["길이"]<=MAX_REFERENCE):
+                    clear_reference()
+                    set_reference(fetch_sequence(selected["ID"]),selected)
+            else:
+                st.info("검색 결과가 없습니다. 전체 핵산 서열 검색도 확인해주세요.")
+        except (requests.RequestException,ValueError,KeyError,TypeError):
+            st.error("NCBI 검색 또는 서열 조회에 실패했습니다. 잠시 후 다시 시도해주세요.")
+
+if "sequence" not in st.session_state:
+    st.info("먼저 위에서 기준 DNA 서열을 선택해주세요.")
+    st.stop()
+
+sequence = st.session_state.sequence
+
+# -------------------- PCR 분석 페이지 연결 --------------------
+# 현재 선택한 기준 DNA 서열을 세션에 저장한 뒤 PCR 페이지로 이동합니다.
+# 세션 상태(session_state)는 같은 Streamlit 앱의 페이지 사이에서 공유됩니다.
+# PCR 페이지에서는 st.session_state.get("pcr_template")로 이 값을 읽으면 됩니다.
+if st.button("🧬 이 DNA 서열로 PCR 분석하기", use_container_width=True):
+    st.session_state["pcr_template"] = sequence
+    st.switch_page("pages/3_PCR.py")
+
+# ② 기본 분석
+st.divider()
+st.subheader("② DNA 기본 분석")
+c1, c2 = st.columns(2)
+c1.metric("DNA 길이", f"{len(sequence):,} bp")
+c2.metric("GC 함량", f"{gc_percent(sequence):.2f}%")
+with st.expander("GC 함량은 무엇을 의미하나요?"):
+    st.markdown("""**GC 함량(%) = (G의 개수 + C의 개수) ÷ 전체 염기 수 × 100**
+
+DNA에서 구아닌(G)과 사이토신(C)이 차지하는 비율을 의미합니다. G-C 염기쌍은 수소 결합 3개, A-T 염기쌍은 2개를 형성하므로, **다른 조건이 같다면 GC 함량이 높은 이중가닥 DNA는 일반적으로 녹는점(Tm)이 높아지는 경향**이 있습니다.
+
+GC 함량은 PCR 프라이머 설계, 서열 특성 비교, DNA의 열적 안정성 추정에 활용됩니다. 다만 **GC 함량만으로 DNA의 실제 안정성이나 유전자 발현량, 단백질 기능을 판단할 수는 없습니다.** DNA 길이·염기 배열·염 농도 등도 영향을 줍니다.""")
+
+# ③ ORF
+st.divider()
+st.subheader("③ ORF 및 아미노산 분석")
+with st.expander("ORF란?"):
+    st.write("ORF(Open Reading Frame)는 시작 코돈에서 종결 코돈까지 이어지는 번역 후보 구간입니다. 유전체 DNA에는 인트론이 포함될 수 있으므로 성숙 mRNA에 대응하는 전사체와 결과가 다를 수 있습니다. ORF는 실제 CDS와 동일하지 않으며 현재 정방향 3개 읽기 틀만 검사합니다.")
+
+if st.button("ORF 분석하기", type="primary", use_container_width=True):
+    st.session_state.pop("dna_result", None)
+    st.session_state.orfs = find_orfs(sequence)
+    st.session_state.pop("selected_orf", None)
+    st.session_state.pop("recommended_orf_choice", None)
+
+selected_orf = None
+if "orfs" in st.session_state:
+    orfs = st.session_state.orfs
+    if not orfs:
+        st.warning("완전한 ORF를 찾지 못했습니다.")
+    else:
+        st.success(f"총 {len(orfs)}개의 ORF를 찾았습니다.")
+        csort, cmin = st.columns(2)
+        sort_method = csort.selectbox(
+            "ORF 정렬 기준",
+            ["긴 길이순", "짧은 길이순", "DNA 위치순"]
+        )
+        min_length = cmin.number_input("최소 ORF 길이 (bp)", min_value=0, value=300, step=30)
+        candidates = [(i, o) for i, o in enumerate(orfs) if len(o["dna"]) >= min_length]
+        if sort_method == "긴 길이순":
+            candidates.sort(key=lambda item: len(item[1]["dna"]), reverse=True)
+        elif sort_method == "짧은 길이순":
+            candidates.sort(key=lambda item: len(item[1]["dna"]))
+        else:
+            candidates.sort(key=lambda item: item[1]["start"])
+
+        st.caption(f"조건에 맞는 ORF: {len(candidates)}개 / 전체 {len(orfs)}개")
+        if not candidates:
+            st.warning("조건에 맞는 ORF가 없습니다. 최소 길이를 낮춰보세요.")
+            st.session_state.pop("selected_orf", None)
+        else:
+            selected_id = st.selectbox(
+                "분석할 ORF",
+                [i for i, _ in candidates],
+                format_func=lambda i: (
+                    f"ORF {i+1} | {len(orfs[i]['dna']):,} bp | "
+                    f"Frame {orfs[i]['frame']} | {orfs[i]['start']:,}–{orfs[i]['end']:,}"
+                )
+            )
+            selected_orf = orfs[selected_id]
+            st.session_state.selected_orf = selected_orf
+
+            c1, c2 = st.columns(2)
+            c1.metric("ORF 길이", f"{len(selected_orf['dna'])} bp")
+            c2.metric("아미노산 길이", f"{max(0, len(selected_orf['protein'])-1)} aa")
+            st.write("번역된 아미노산 서열")
+            st.code(selected_orf["protein"])
+else:
+    selected_orf = st.session_state.get("selected_orf")
+
+# ④ 변이 분석
+st.divider()
+st.subheader("④ DNA 변이 및 단백질 영향 분석")
+st.write("기준 DNA에서 비교 서열과 가장 유사한 영역을 정렬하고, 선택한 ORF의 코돈·아미노산 변화를 살펴봅니다.")
+st.caption("정방향 국소 정렬을 사용합니다. 유사성이 낮거나 역방향인 서열은 별도 확인이 필요합니다.")
+
+source = st.radio("비교 데이터", ["직접 DNA 입력", "NCBI 비교 서열"], horizontal=True)
+
+if source == "직접 DNA 입력":
+    sample_text = st.text_area("비교할 DNA 서열", height=130, placeholder="ATGCGT...")
+    if st.button("변이 분석하기", type="primary", use_container_width=True):
+        clear_variant()
+        sample = clean_dna(sample_text)
+        if not sample:
+            st.warning("비교할 DNA를 입력해주세요.")
+        elif any(b not in "ATGC" for b in sample):
+            st.error("A, T, G, C만 입력해주세요.")
+        else:
+            save_alignment(sample)
+
+else:
+    query = st.text_input("유전자명, accession 또는 검색어", placeholder="예: TP53 Homo sapiens")
+    if st.button("NCBI 비교 서열 검색", use_container_width=True):
+        clear_variant()
+        st.session_state.pop("compare_results", None)
+        if not query.strip():
+            st.warning("검색어를 입력해주세요.")
+        else:
+            try:
+                ids, total = search_db("nuccore", query, 10)
+                rows = summaries("nuccore", ids)
+                st.session_state.compare_total = total
+                st.session_state.compare_results = [
+                    {"ID": i, "제목": r.get("title", "제목 없음"),
+                     "Accession": r.get("accessionversion", ""),
+                     "길이": r.get("slen", 0)}
+                    for i, r in zip(ids, rows)
+                ]
+            except (requests.RequestException, KeyError, ValueError):
+                st.error("NCBI 검색에 실패했습니다.")
+
+    if "compare_results" in st.session_state:
+        rows = st.session_state.compare_results
+        st.write(f"검색 결과: 총 {st.session_state.get('compare_total', len(rows)):,}개 (상위 {len(rows)}개 표시)")
+        if rows:
+            choice = st.selectbox(
+                "비교할 서열", rows,
+                format_func=lambda x: f"{x['Accession']} | {x['제목']} | {x['길이']} bp"
+            )
+            if st.button("선택한 서열 변이 분석하기", type="primary", use_container_width=True):
+                clear_variant()
+                try:
+                    if not 0 < choice["길이"] <= MAX_SAMPLE:
+                        raise ValueError("서열 길이 제한")
+                    sample = fetch_sequence(choice["ID"])
+                    if not sample or any(b not in "ATGC" for b in sample):
+                        st.error("선택한 기록에 A/T/G/C 이외의 문자가 있어 분석할 수 없습니다.")
+                    else:
+                        save_alignment(sample)
+                except (requests.RequestException, ValueError, KeyError):
+                    st.error("비교 서열을 가져오지 못했습니다. 10,000 bp 이하 기록을 선택해주세요.")
+        else:
+            st.info("검색 결과가 없습니다.")
+
+if "variant_result" in st.session_state:
+    r = st.session_state.variant_result
+    variants = r["variants"]
+    st.divider()
+    st.subheader("서열 정렬 결과")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("기준 DNA의 유사 구간", f"{r['start']:,}–{r['end']:,} bp")
+    c2.metric("정렬 구간 일치도", f"{r['identity']:.2f}%")
+    c3.metric("비교 서열 정렬 비율", f"{r['coverage']:.2f}%")
+    st.caption("일치도는 정렬된 열 기준이며, 정렬되지 않은 비교 서열의 끝부분은 변이로 집계하지 않습니다.")
+
+    if variants:
+        df = pd.DataFrame([
+            {**v, "치환 유형": substitution_type(v["기준 염기"], v["비교 염기"])}
+            for v in variants
+        ])
+        st.write(f"정렬된 영역에서 총 {len(df)}개 변이 항목을 찾았습니다.")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        with st.expander("변이 유형 설명: SNP / Deletion / Insertion"):
+            st.markdown("""- **SNP(단일 염기 치환):** 한 위치의 염기가 다른 염기로 바뀐 경우입니다. 코돈에 따라 아미노산이 유지되거나 달라질 수 있습니다.
+- **Deletion(결실):** 기준 서열에 있던 염기가 비교 서열에서 사라진 경우입니다.
+- **Insertion(삽입):** 기준 서열에는 없던 염기가 비교 서열에 추가된 경우입니다.
+
+코딩 영역에서 3의 배수가 아닌 염기가 삽입·결실되면 읽기 틀이 달라질 수 있습니다.""")
+        with st.expander("치환 유형 설명: Transition / Transversion"):
+            st.markdown("""- **Transition(전이):** 같은 계열 염기끼리의 치환입니다. 퓨린 A↔G 또는 피리미딘 C↔T.
+- **Transversion(전환):** 서로 다른 계열 간 치환입니다. A/G ↔ C/T.
+
+이 분류는 **염기의 화학적 계열**을 나타내며, 그 자체로 단백질 기능에 미치는 영향의 크기를 뜻하지는 않습니다.""")
+        st.write("**DNA 이중나선과 변이 위치**")
+        st.caption("그래프 안에서 **대각선으로 드래그해 사각형 영역을 선택**하면 가로·세로가 함께 확대됩니다. "
+                   "위쪽 도구막대의 확대/축소·이동 기능도 사용할 수 있고, 더블클릭하면 초기 화면으로 돌아옵니다. "
+                   "염기쌍은 마우스를 올려 확인할 수 있습니다.")
+        left, right = r["start"], r["end"]
+        if right-left+1 > 1500:
+            st.info("화면 성능을 위해 변이 주변의 연속된 1,500 bp를 표시합니다. "
+                    "전체 변이 목록은 위 표에서 확인할 수 있습니다.")
+        positions = sorted({max(left,min(right,v["기준 위치"])) for v in variants})
+        center = st.selectbox("확대할 변이 위치 (bp)", positions)
+        width = min(1500, right-left+1)
+        left = max(left, min(right-width+1, center-width//2))
+        right = left+width-1
+        fig = dna_variant_figure(sequence,left,right,variants)
+        fig.update_xaxes(range=[max(left,center-30),min(right,center+30)])
+        fig.update_layout(uirevision=f"variant-{center}")
+        st.plotly_chart(fig,use_container_width=True,
+                        config={"scrollZoom": True, "displayModeBar": True,
+                                 "modeBarButtonsToRemove": ["autoScale2d"]})
+        st.caption("하나의 그래프에서 가로·세로를 함께 확대/축소합니다. B형 DNA의 평균 약 10.5 bp/회전을 반영한 교육용 모식도입니다. "
+                   "빨강=SNP, 보라=결실, 초록=삽입. 3차원 원자 구조는 아닙니다.")
+    else:
+        st.success("정렬된 구간에서 염기 차이를 찾지 못했습니다.")
+
+    st.subheader("선택한 ORF의 단백질 영향")
+    orfs = st.session_state.get("orfs", [])
+    if not orfs:
+        st.info("먼저 ③ ORF 분석하기를 눌러 ORF 후보를 생성해주세요.")
+        chosen_orf = None
+    else:
+        recommended = recommend_orfs(orfs, r)
+        if recommended:
+            st.write("**비교 서열과 겹치는 ORF 추천**")
+            st.caption("전체 포함 여부 → ORF 정렬 비율 → 겹치는 염기 수 순으로 추천합니다. "
+                       "ORF가 실제 코딩 영역이라는 의미는 아닙니다.")
+            best = recommended[:30]
+            chosen_index = st.selectbox(
+                "단백질 영향 분석에 사용할 ORF",
+                [item["index"] for item in best],
+                format_func=lambda i: next(
+                    f"ORF {i+1} | {item['orf']['start']:,}–{item['orf']['end']:,} bp | "
+                    f"길이 {len(item['orf']['dna']):,} bp | 겹침 {item['fraction']:.1%} | "
+                    f"{'전체 정렬' if item['full'] else '부분 정렬'}"
+                    for item in best if item["index"] == i),
+                key="recommended_orf_choice"
+            )
+            chosen_orf = orfs[chosen_index]
+            if not next(item["full"] for item in best if item["index"] == chosen_index):
+                st.warning("선택한 ORF가 비교 서열에 완전히 포함되지 않아 단백질 영향 계산이 제한될 수 있습니다.")
+        else:
+            st.warning("현재 정렬 구간과 겹치는 ORF를 찾지 못했습니다.")
+            chosen_orf = None
+    effect, reason = analyze_orf_effect(sequence, r, chosen_orf)
+    if reason:
+        st.info(reason)
+    else:
+        st.write(effect["summary"])
+        if effect["rows"]:
+            st.dataframe(pd.DataFrame(effect["rows"]), use_container_width=True, hide_index=True)
+        if effect["ref_protein"] != effect["alt_protein"]:
+            with st.expander("변이 전·후 예측 아미노산 서열"):
+                st.write("기준 아미노산 서열")
+                st.code(effect["ref_protein"])
+                st.write("비교 아미노산 서열")
+                st.code(effect["alt_protein"])
+        if effect.get("indels"):
+            st.warning("삽입·결실이 포함되어 코돈별 SNP 해석 대신 전체 ORF 번역 결과를 표시합니다. "
+                       "프레임시프트 여부는 삽입·결실의 위치와 길이를 추가로 확인해야 합니다.")
+    with st.expander("프레임시프트란? 결과를 어떻게 해석할까요?"):
+        st.markdown("""**프레임시프트(Frameshift)**는 코딩 영역에서 3의 배수가 아닌 수의
+염기가 삽입·결실되어 이후 코돈을 읽는 틀이 달라지는 현상입니다.
+
+- **변이 전후 아미노산 서열**: 달라진 부분과 새 종결 코돈(`*`)의 발생 여부를 확인합니다.
+- **조기 종결 코돈**: 단백질이 짧아질 가능성이 있지만 실제 발현 여부는 별도 검증이 필요합니다.
+- **여러 삽입·결실**: 중간에 틀이 이동했다가 복구될 수 있어 순길이만으로는 충분하지 않습니다.
+- **주의**: ORF는 예측된 후보일 수 있으며, 실제 기능 손상이나 질병 관련성을 단정할 수 없습니다.""")
+    st.caption("이 분석은 선택한 ORF를 코딩 영역으로 가정한 교육용 예측입니다. "
+               "실제 단백질 기능 변화나 질병 유발 여부를 판정하지 않습니다. "
+               "ClinVar 연동은 참조 서열과 변이 좌표의 정확한 매칭이 필요해 이번 버전에서 제외했습니다.")
+
+# ==================== AI 생명공학교사 연결 ====================
+st.divider()
+st.subheader("⑤ AI 생명공학교사 연동")
+st.write("현재 DNA 분석 결과를 저장한 뒤 AI 생명공학교사에게 질문할 수 있습니다.")
+st.caption("선택한 분석 결과는 이 Streamlit 세션에 저장됩니다. AI 페이지에서 선택하면 Gemini API로 전송됩니다.")
+
+# 프라이머 검토 등에 필요한 실제 염기서열 구간을 선택해 전달합니다.
+st.markdown("**AI에 포함할 실제 DNA 염기서열 구간**")
+st.caption("좌표는 현재 기준 DNA의 1-based 위치입니다. 선택 구간의 A/T/G/C 배열을 AI에 전달합니다.")
+include_region = st.checkbox("선택 구간의 염기서열 포함", value=True, key="dna_ai_include_region")
+max_region_bp = 4000
+region_start_default = 1
+region_end_default = min(len(sequence), 1200)
+if "dna_ai_sequence_identity" not in st.session_state or st.session_state.dna_ai_sequence_identity != sequence:
+    st.session_state.dna_ai_sequence_identity = sequence
+    st.session_state.dna_ai_region_start = region_start_default
+    st.session_state.dna_ai_region_end = region_end_default
+
+region_col1, region_col2 = st.columns(2)
+with region_col1:
+    region_start = st.number_input(
+        "시작 위치 (bp)", min_value=1, max_value=len(sequence),
+        step=1, key="dna_ai_region_start", disabled=not include_region,
+    )
+with region_col2:
+    region_end = st.number_input(
+        "종료 위치 (bp)", min_value=1, max_value=len(sequence),
+        step=1, key="dna_ai_region_end", disabled=not include_region,
+    )
+region_valid = (not include_region or
+                (region_start <= region_end and region_end - region_start + 1 <= max_region_bp))
+if include_region:
+    if region_start > region_end:
+        st.error("시작 위치는 종료 위치보다 작거나 같아야 합니다.")
+    elif region_end - region_start + 1 > max_region_bp:
+        st.error(f"한 번에 전달할 수 있는 실제 염기서열은 최대 {max_region_bp:,} bp입니다.")
+    else:
+        st.caption(f"전달할 구간: {region_start:,}–{region_end:,} bp "
+                   f"({region_end - region_start + 1:,} bp)")
+        with st.expander("AI에 전달할 실제 염기서열 미리보기"):
+            st.code(sequence[region_start - 1:region_end], language="text")
+
+if st.button("현재 DNA 분석 결과를 AI에게 전달하기", use_container_width=True, disabled=not region_valid):
+    dna_result = {
+        "데이터 출처": st.session_state.get("dna_record", {"유형": "현재 선택한 DNA 서열"}),
+        "DNA 기본 분석": {
+            "길이_bp": len(sequence),
+            "GC_함량_퍼센트": round(gc_percent(sequence), 4),
+            "염기서열_앞부분_최대_300bp": sequence[:300],
+            "서열_일부만_제공": len(sequence) > 300,
+        },
+        "분석 제한": [
+            "ORF 탐색은 정방향 3개 읽기 틀만 분석한 예측 결과입니다.",
+            "변이 분석은 국소 정렬이며 정렬되지 않은 양 끝은 비교에서 제외될 수 있습니다.",
+            "예측 단백질 영향은 실험적 검증이나 임상적 판정을 의미하지 않습니다.",
+        ],
+    }
+
+    all_orfs = st.session_state.get("orfs")
+    if all_orfs is not None:
+        dna_result["ORF 분석"] = {
+            "발견된_ORF_수": len(all_orfs),
+            "ORF_목록_최대_30개": [
+                {"읽기틀": o["frame"], "시작": o["start"], "끝": o["end"],
+                 "길이_bp": len(o["dna"]), "예측_아미노산_앞부분": o["protein"][:120]}
+                for o in all_orfs[:30]
+            ],
+            "목록_일부_생략": len(all_orfs) > 30,
+        }
+        current_orf = st.session_state.get("selected_orf")
+        if current_orf is not None:
+            dna_result["ORF 분석"]["선택한_ORF"] = {
+                "읽기틀": current_orf["frame"],
+                "시작": current_orf["start"],
+                "끝": current_orf["end"],
+                "길이_bp": len(current_orf["dna"]),
+                "예측_아미노산_앞부분": current_orf["protein"][:300],
+            }
+
+    alignment = st.session_state.get("variant_result")
+    if alignment is not None:
+        changes = alignment["variants"]
+        dna_result["서열 정렬 및 변이 분석"] = {
+            "기준_서열_정렬_시작": alignment["start"],
+            "기준_서열_정렬_끝": alignment["end"],
+            "일치도_퍼센트": round(alignment["identity"], 4),
+            "비교_서열_정렬_비율_퍼센트": round(alignment["coverage"], 4),
+            "정렬된_비교_서열_염기수": alignment["aligned_bases"],
+            "변이_항목_수": len(changes),
+            "변이_목록_최대_100개": [
+                {**v, "치환 유형": substitution_type(v["기준 염기"], v["비교 염기"])}
+                for v in changes[:100]
+            ],
+            "변이_목록_일부_생략": len(changes) > 100,
+        }
+        ranked_orfs = st.session_state.get("orfs", [])
+        selected_index = st.session_state.get("recommended_orf_choice")
+        if isinstance(selected_index, int) and 0 <= selected_index < len(ranked_orfs):
+            effect_orf = ranked_orfs[selected_index]
+        else:
+            effect_orf = None
+        protein_effect, limitation = analyze_orf_effect(sequence, alignment, effect_orf)
+        if protein_effect is not None:
+            dna_result["선택한 ORF의 예측 단백질 영향"] = {
+                "요약": protein_effect["summary"],
+                "코돈별_영향_최대_50개": protein_effect["rows"][:50],
+                "코돈별_영향_일부_생략": len(protein_effect["rows"]) > 50,
+                "기준_아미노산_앞부분": protein_effect["ref_protein"][:300],
+                "비교_아미노산_앞부분": protein_effect["alt_protein"][:300],
+            }
+        elif limitation:
+            dna_result["단백질 영향 분석 제한"] = limitation
+
+    if include_region:
+        selected_sequence = sequence[region_start - 1:region_end]
+        dna_result["AI용 실제 DNA 구간"] = {
+            "좌표_기준": "현재 기준 DNA, 1-based, 시작과 끝 포함, 정방향 5′→3′",
+            "시작_bp": int(region_start),
+            "끝_bp": int(region_end),
+            "길이_bp": len(selected_sequence),
+            "실제_염기서열_5to3": selected_sequence,
+            "설명": "이 구간에 대해서만 실제 염기서열이 제공되었습니다. 다른 위치의 염기를 추측하지 마세요.",
+        }
+
+    st.session_state["dna_result"] = dna_result
+    st.success("DNA 분석 결과를 저장했습니다. AI 생명공학교사 페이지에서 확인할 수 있습니다.")
+    st.switch_page("pages/4_AI_teacher.py")
