@@ -327,6 +327,33 @@ def _apply_import(df, selected, kind, row_number, measurement_col):
     return target
 
 
+# 입력표의 자료형을 통일하고 잘못된 값을 편집기에 전달하지 않습니다.
+ABS_COLS = [f'흡광도 {i}' for i in range(1, 4)]
+MASS_COLS = ['전체 시료 질량 (g)', '추출에 사용한 시료 질량 (g)', '회수 상등액 부피 (mL)']
+
+def normalize_table(df, standard):
+    required = ['단백질 농도 (mg/mL)'] + ABS_COLS if standard else ['시료명'] + ABS_COLS + ['희석배수']
+    if not set(required).issubset(df.columns):
+        raise ValueError('필수 열이 누락되었습니다: ' + ', '.join(set(required)-set(df.columns)))
+    df = df.copy()
+    if not standard:
+        for c in MASS_COLS:
+            if c not in df: df[c] = np.nan
+    df = df[required + ([] if standard else MASS_COLS)].reset_index(drop=True)
+    for c in df.columns:
+        if c == '시료명':
+            df[c] = df[c].fillna('').astype(str)
+            continue
+        raw = df[c].replace(r'^\s*$', np.nan, regex=True)
+        numeric = pd.to_numeric(raw, errors='coerce')
+        invalid = raw.notna() & (numeric.isna() | ~np.isfinite(numeric) | (numeric < 0))
+        if c == '희석배수': invalid |= numeric.notna() & (numeric < 1)
+        if c in MASS_COLS: invalid |= numeric.notna() & (numeric <= 0)
+        if invalid.any():
+            raise ValueError(f'{c}: {int(np.flatnonzero(invalid)[0])+1}행의 값을 확인하세요.')
+        df[c] = numeric.astype(float)
+    return df
+
 # -------------------- 화면 --------------------
 st.title("🧪 BCA 단백질 정량 분석")
 st.write("표준곡선으로 단백질 농도를 계산하고, 반복 측정의 일관성과 결과 해석의 한계를 확인합니다.")
@@ -362,7 +389,7 @@ if 'bca_editor_version' not in st.session_state:
     st.session_state.bca_editor_version = 0
 
 st.subheader('① 분광광도계 파일 불러오기 (선택)')
-st.info('BCA 측정 시 분광광도계의 파장을 **562 nm**로 설정하세요. 파일 분석에서는 **561~563 nm (562 ± 1 nm)**를 허용합니다.')
+st.info('BCA 측정 파장: 562 nm / 파일 분석 허용 범위: 561~563 nm')
 st.caption('Vernier SpectroVis Plus 측정 파일(.smbl)을 업로드해 보세요. CSV/TSV/JSON/XML 형식도 지원합니다. 파일 형식에 따라 자동 추출이 불가능할 수 있습니다.')
 uploaded = st.file_uploader('측정 파일 업로드', type=['smbl', 'csv', 'tsv', 'json', 'xml', 'txt'], accept_multiple_files=True)
 if uploaded:
@@ -377,7 +404,7 @@ if uploaded:
                 else:
                     frames.append(extracted)
             except (ValueError, OSError, zipfile.BadZipFile) as exc:
-                failed.append(f'{f.name} ({exc})')
+                failed.append(f.name)
         st.session_state.bca_import_data = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         st.session_state.bca_upload_signature = signature
         st.session_state.bca_import_failed = failed
@@ -391,8 +418,8 @@ if uploaded:
             st.error('561~563 nm 범위의 측정값이 없습니다. 측정 파장과 파일 내용을 확인하세요.')
         else:
             st.success(f'562 ± 1 nm 범위의 흡광도 {len(valid)}개를 찾았습니다.')
-            st.dataframe(valid, hide_index=True, use_container_width=True)
-            st.caption('각 데이터 세트에서 562 nm와 가장 가까운 파장 하나를 선택했습니다. 데이터 세트 이름과 실제 시료를 확인하세요.')
+            st.dataframe(valid, hide_index=True, width='stretch')
+            st.caption('SMBL 스펙트럼은 데이터 세트별로 562 nm에 가장 가까운 값을 선택합니다. 다른 형식은 아래 표에서 실제 측정값을 확인하세요.')
             # 표준용액과 미지 시료를 각각 여러 개 일괄 입력할 수 있습니다.
             if '데이터 세트' in valid.columns:
                 with st.expander('SMBL 데이터 세트 일괄 입력', expanded=True):
@@ -458,33 +485,54 @@ if uploaded:
                             else:
                                 key = 'bca_unknown_table'
                                 result = pd.DataFrame(rows)
-                            st.session_state[key] = result
+                            st.session_state[key] = normalize_table(result, batch_kind == "표준용액")
                             st.session_state.bca_editor_version += 1
                             st.session_state.pop('bca_result', None)
                             st.rerun()
-            with st.form('bca_import_form'):
-                choices = [f"{i+1}. {row['파일/데이터']} | {row['파장 (nm)']:.2f} nm | 흡광도 {row['흡광도']:.5f}" for i, row in valid.iterrows()]
-                chosen = st.selectbox('입력할 측정값', range(len(choices)), format_func=lambda i: choices[i])
-                target_type = st.radio('입력 대상', ['표준용액', '미지 시료'], horizontal=True)
-                current_df = st.session_state.bca_standard_table if target_type == '표준용액' else st.session_state.bca_unknown_table
-                row_index = st.number_input('입력할 행 번호 (1부터 시작)', min_value=1, max_value=100, value=1, step=1)
-                column = st.selectbox('흡광도 입력 칸', ['흡광도 1', '흡광도 2', '흡광도 3'])
-                submitted = st.form_submit_button('선택한 흡광도 입력표에 적용')
-            if submitted:
-                value = valid.iloc[chosen]['흡광도']
-                if value < 0:
-                    st.error('음수 흡광도는 현재 BCA 분석 입력 규칙에서 허용하지 않습니다.')
-                else:
-                    key = 'bca_standard_table' if target_type == '표준용액' else 'bca_unknown_table'
-                    st.session_state[key] = _apply_import(st.session_state[key], value, target_type, int(row_index)-1, column)
-                    if target_type == '미지 시료':
-                        item = valid.iloc[chosen]
-                        dataset_name = str(item.get('데이터 세트', '')).strip()
-                        if dataset_name and dataset_name.lower() != 'nan':
-                            st.session_state[key].loc[int(row_index)-1, '시료명'] = dataset_name
-                    st.session_state.bca_editor_version += 1
-                    st.session_state.pop('bca_result', None)
-                    st.rerun()
+            with st.expander('측정값 여러 개를 한 번에 입력', expanded=True):
+                st.caption('가져올 행을 선택하고 대상과 시료명 또는 농도를 지정하세요. 같은 대상의 같은 이름은 반복 측정으로 묶입니다. 적용하면 해당 입력표를 교체합니다.')
+                mapping = valid.copy()
+                mapping['선택'] = True
+                mapping['대상'] = '미지 시료'
+                mapping['시료명 또는 농도'] = mapping.get('데이터 세트', mapping['파일/데이터']).fillna(mapping['파일/데이터']).astype(str)
+                with st.form('bca_bulk_mapping'):
+                    mapped = st.data_editor(mapping, hide_index=True, width='stretch', disabled=list(valid.columns), column_config={'대상': st.column_config.SelectboxColumn('대상', options=['표준용액','미지 시료']), '선택': st.column_config.CheckboxColumn('선택')}, column_order=['선택','대상','시료명 또는 농도','흡광도','파장 (nm)','파일/데이터'])
+                    conc_unit = st.selectbox('표준용액 농도 단위', ['mg/mL','µg/mL'])
+                    confirm = st.checkbox('선택한 대상의 기존 입력표를 교체합니다.')
+                    apply_bulk = st.form_submit_button('선택한 측정값 일괄 적용')
+                if apply_bulk:
+                    try:
+                        if not confirm: raise ValueError('입력표 교체에 동의해 주세요.')
+                        grouped = {'표준용액': {}, '미지 시료': {}}
+                        for _, item in mapped[mapped['선택']].iterrows():
+                            kind = item['대상']; name = str(item['시료명 또는 농도']).strip()
+                            value = float(item['흡광도'])
+                            if not name or not np.isfinite(value) or value < 0: raise ValueError('시료명과 흡광도를 확인하세요.')
+                            if kind == '표준용액':
+                                name = _number(name)
+                                if name is None or name < 0: raise ValueError('표준용액 농도는 0 이상의 숫자로 입력하세요.')
+                                if conc_unit == 'µg/mL': name /= 1000
+                            grouped[kind].setdefault(name, []).append(value)
+                        updates = {}
+                        for kind, entries in grouped.items():
+                            if not entries: continue
+                            rows = []
+                            for name, values in entries.items():
+                                if len(values)>3: raise ValueError(f'{name}: 반복 측정은 최대 3개입니다.')
+                                row = dict(zip(ABS_COLS, values + [np.nan]*(3-len(values))))
+                                if kind == '표준용액': row['단백질 농도 (mg/mL)'] = name
+                                else: row.update({'시료명':name,'희석배수':1.0})
+                                rows.append(row)
+                            standard = kind == '표준용액'
+                            updates['bca_standard_table' if standard else 'bca_unknown_table'] = normalize_table(pd.DataFrame(rows), standard)
+                        if not updates: raise ValueError('선택한 측정값이 없습니다.')
+                        for key, value in updates.items(): st.session_state[key] = value
+                        st.session_state.bca_editor_version += 1
+                        st.session_state.pop('bca_result', None)
+                        st.rerun()
+                    except (ValueError, TypeError, KeyError):
+                        st.error('일괄 입력 실패: 시료명, 농도, 흡광도, 반복 측정 수 및 교체 동의를 확인하세요.')
+
 else:
     st.session_state.pop('bca_upload_signature', None)
     st.session_state.pop('bca_import_data', None)
@@ -492,16 +540,16 @@ else:
 
 # 고정 열 너비를 지정하여 입력 도중 표의 세로 구분선이 움직이지 않도록 합니다.
 STANDARD_WIDTHS = {
-    '단백질 농도 (mg/mL)': st.column_config.NumberColumn('단백질 농도 (mg/mL)', width=180),
-    **{f'흡광도 {i}': st.column_config.NumberColumn(f'흡광도 {i}', width=125, format='%.6f') for i in range(1, 4)}
+    '단백질 농도 (mg/mL)': st.column_config.NumberColumn('단백질 농도 (mg/mL)', width="medium"),
+    **{f'흡광도 {i}': st.column_config.NumberColumn(f'흡광도 {i}', width="small", format='%.6f') for i in range(1, 4)}
 }
 UNKNOWN_WIDTHS = {
-    '시료명': st.column_config.TextColumn('시료명', width=165),
-    **{f'흡광도 {i}': st.column_config.NumberColumn(f'흡광도 {i}', width=125, format='%.6f') for i in range(1, 4)},
-    '희석배수': st.column_config.NumberColumn('희석배수', width=110),
-    '전체 시료 질량 (g)': st.column_config.NumberColumn('전체 시료 질량 (g)', width=165),
-    '추출에 사용한 시료 질량 (g)': st.column_config.NumberColumn('추출에 사용한 시료 질량 (g)', width=215),
-    '회수 상등액 부피 (mL)': st.column_config.NumberColumn('회수 상등액 부피 (mL)', width=195),
+    '시료명': st.column_config.TextColumn('시료명', width="medium"),
+    **{f'흡광도 {i}': st.column_config.NumberColumn(f'흡광도 {i}', width="small", format='%.6f') for i in range(1, 4)},
+    '희석배수': st.column_config.NumberColumn('희석배수', width="small"),
+    '전체 시료 질량 (g)': st.column_config.NumberColumn('전체 시료 질량 (g)', width="medium"),
+    '추출에 사용한 시료 질량 (g)': st.column_config.NumberColumn('추출에 사용한 시료 질량 (g)', width="medium"),
+    '회수 상등액 부피 (mL)': st.column_config.NumberColumn('회수 상등액 부피 (mL)', width="medium"),
 }
 
 # 이전 버전의 표에도 필요한 열을 보완합니다.
@@ -510,36 +558,33 @@ for field in ('전체 시료 질량 (g)', '추출에 사용한 시료 질량 (g)
         st.session_state.bca_unknown_table[field] = np.nan
 
 st.subheader('② 표준용액 및 ③ 미지 시료 데이터')
-st.caption('입력 중 다른 칸을 눌러도 값이 초기화되지 않도록 두 표를 하나의 입력 폼으로 묶었습니다. 편집을 마치면 아래 저장/분석 버튼을 누르세요.')
+st.caption('입력 중 다른 칸을 눌러도 값이 초기화되지 않도록 두 표를 하나의 입력 폼으로 묶었습니다. 편집을 마치면 아래 분석 버튼을 누르세요.')
 with st.form(key=f"bca_tables_form_{st.session_state.bca_editor_version}", clear_on_submit=False):
     st.markdown('**표준용액 데이터**')
     standard_data = st.data_editor(
         st.session_state.bca_standard_table, num_rows='dynamic',
-        use_container_width=True, hide_index=True,
+        width='stretch', hide_index=True,
         column_config=STANDARD_WIDTHS, key=f"bca_standards_{st.session_state.bca_editor_version}")
     st.markdown('**미지 시료 데이터**')
-    st.caption('전체 질량 환산에는 시료별 질량 2개와 원심분리 후 회수한 상등액 전체 부피(mL)를 입력합니다.')
+    st.caption('모바일에서는 표를 좌우로 스크롤할 수 있습니다. 전체 질량 환산에는 시료별 질량 2개와 원심분리 후 회수한 상등액 전체 부피(mL)를 입력합니다.')
     unknown_data = st.data_editor(
         st.session_state.bca_unknown_table, num_rows='dynamic',
-        use_container_width=True, hide_index=True,
+        width='stretch', hide_index=True,
         column_config=UNKNOWN_WIDTHS, key=f"bca_unknowns_{st.session_state.bca_editor_version}")
-    left, right = st.columns(2)
-    with left:
-        save_clicked = st.form_submit_button('입력값 저장', use_container_width=True)
-    with right:
-        analyze_clicked = st.form_submit_button('입력값 저장 및 BCA 분석하기', type='primary', use_container_width=True)
+    analyze_clicked = st.form_submit_button('입력값 저장 및 BCA 분석하기', type='primary', width='stretch')
 
-if save_clicked or analyze_clicked:
-    st.session_state.bca_standard_table = standard_data.copy()
-    st.session_state.bca_unknown_table = unknown_data.copy()
-    if analyze_clicked:
-        try:
-            st.session_state.bca_result = analyze(standard_data, unknown_data)
-        except (ValueError, TypeError, np.linalg.LinAlgError) as exc:
-            st.session_state.pop("bca_result", None)
-            st.error(str(exc))
-    else:
-        st.success('입력값을 현재 세션에 저장했습니다.')
+if analyze_clicked:
+    st.session_state.pop('bca_result', None)
+    try:
+        std = normalize_table(standard_data, True)
+        unk = normalize_table(unknown_data, False)
+        st.session_state.bca_standard_table = std
+        st.session_state.bca_unknown_table = unk
+        st.session_state.bca_result = analyze(std, unk)
+    except ValueError as exc:
+        st.error(str(exc))
+    except (TypeError, np.linalg.LinAlgError, KeyError):
+        st.error('분석할 수 없습니다. 입력값과 표준용액 농도를 확인하세요.')
 
 # 브라우저가 페이지를 완전히 다시 로드하면 session_state가 초기화될 수 있습니다.
 # CSV 두 개를 ZIP으로 백업하고 다시 불러오는 기능을 제공합니다.
@@ -566,13 +611,17 @@ with st.expander('백업 ZIP 파일로 입력표 복원'):
             for field in ('전체 시료 질량 (g)', '추출에 사용한 시료 질량 (g)', '회수 상등액 부피 (mL)'):
                 if field not in restored_unk.columns:
                     restored_unk[field] = np.nan
+            restored_std = normalize_table(restored_std, True)
+            restored_unk = normalize_table(restored_unk, False)
+            parse_measurements(restored_std, "표준용액", True)
+            parse_measurements(restored_unk, "미지 시료", False)
             st.session_state.bca_standard_table = restored_std
             st.session_state.bca_unknown_table = restored_unk
             st.session_state.bca_editor_version += 1
             st.session_state.pop('bca_result', None)
             st.rerun()
-        except (ValueError, OSError, zipfile.BadZipFile, pd.errors.ParserError) as exc:
-            st.error(f'백업 복원 실패: {exc}')
+        except (ValueError, OSError, zipfile.BadZipFile, pd.errors.ParserError, TypeError, KeyError, UnicodeError) as exc:
+            st.error("백업 복원 실패: ZIP 구성, 필수 열 및 입력값을 확인하세요.")
 
 if "bca_result" in st.session_state:
     r = st.session_state.bca_result
@@ -640,25 +689,25 @@ if "bca_result" in st.session_state:
             hovertemplate=f"{unknown['시료명']}<br>농도 %{{x:.3f}} mg/mL<br>흡광도 %{{y:.4f}}<extra></extra>"
         ))
     fig.update_layout(xaxis_title="단백질 농도 (mg/mL)", yaxis_title="흡광도", height=420)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     st.caption("오차막대는 반복 측정의 ±1 표본 표준편차입니다. 반복 측정이 1회이면 오차막대를 표시하지 않습니다.")
 
     st.subheader("⑤ 표준용액 신뢰도 분석")
     standard_cols = ["단백질 농도 (mg/mL)", "측정 횟수", "평균 흡광도", "표준편차", "CV (%)", "예측 흡광도", "잔차"]
-    st.dataframe(table(standards, standard_cols).round(4), use_container_width=True, hide_index=True)
+    st.dataframe(table(standards, standard_cols).round(4), width='stretch', hide_index=True)
     residual_fig = px.bar(table(standards, standard_cols), x="단백질 농도 (mg/mL)", y="잔차",
                           title="표준곡선 잔차 (실제 평균 흡광도 − 예측 흡광도)")
     residual_fig.add_hline(y=0, line_dash="dash")
-    st.plotly_chart(residual_fig, use_container_width=True)
+    st.plotly_chart(residual_fig, width='stretch')
 
     st.subheader("⑥ 미지 시료별 단백질 농도")
     unknown_cols = ["시료명", "측정 횟수", "평균 흡광도", "표준편차", "CV (%)",
                     "희석배수", "측정 시료 농도 (mg/mL)", "원액 농도 (mg/mL)", "해석"]
-    st.dataframe(table(unknowns, unknown_cols).round(4), use_container_width=True, hide_index=True)
+    st.dataframe(table(unknowns, unknown_cols).round(4), width='stretch', hide_index=True)
     concentration_fig = px.bar(table(unknowns, unknown_cols), x="시료명", y="원액 농도 (mg/mL)",
                                title="미지 시료별 원액 단백질 농도", text_auto=".3f")
     concentration_fig.update_traces(marker_color=selected_colors)
-    st.plotly_chart(concentration_fig, use_container_width=True)
+    st.plotly_chart(concentration_fig, width='stretch')
 
     st.subheader("⑦ 전체 시료의 추정 단백질 양")
     st.caption("회수 상등액의 전체 부피를 기준으로 계산합니다. 추출 과정의 단백질 손실은 보정하지 않았으며, 일부 시료의 결과를 전체로 환산하려면 시료가 균일하다는 가정이 필요합니다.")
@@ -670,12 +719,12 @@ if "bca_result" in st.session_state:
     if np.isfinite(u.get("전체 시료 추정 단백질 양 (g)", np.nan))
 ]
     if mass_rows:
-        st.dataframe(table(mass_rows, mass_cols).round(4), hide_index=True, use_container_width=True)
+        st.dataframe(table(mass_rows, mass_cols).round(4), hide_index=True, width='stretch')
         mass_fig = px.bar(table(mass_rows, mass_cols), x="시료명", y="전체 시료 추정 단백질 양 (g)",
                           title="전체 시료별 추정 단백질 양", text_auto=".3f")
         color_lookup = {u["시료명"]: selected_colors[i] for i, u in enumerate(unknowns)}
         mass_fig.update_traces(marker_color=[color_lookup.get(u["시료명"], "#1769FF") for u in mass_rows])
-        st.plotly_chart(mass_fig, use_container_width=True)
+        st.plotly_chart(mass_fig, width='stretch')
         if any("표준곡선 농도 범위 밖" in u["해석"] for u in mass_rows):
             st.warning("일부 시료는 표준곡선 범위 밖에서 농도가 계산되었습니다. 전체 단백질 양도 신뢰하기 어려우므로 희석 후 재측정을 고려하세요.")
     else:
@@ -704,7 +753,7 @@ if "bca_result" in st.session_state:
     st.write("현재 BCA 분석 결과를 AI 생명공학교사 페이지에서 해석할 수 있습니다.")
     st.caption("분석 결과는 현재 Streamlit 세션에 보관되며, AI 페이지에서 해당 데이터를 선택해 질문할 때 Gemini API에 전달됩니다.")
 
-    if st.button("현재 BCA 분석 결과를 AI에게 전달하기", use_container_width=True):
+    if st.button("현재 BCA 분석 결과를 AI에게 전달하기", width='stretch'):
         # 위에서 계산한 결과를 AI 페이지와 공유합니다.
         st.session_state["bca_result"] = r
         st.switch_page("pages/4_AI_teacher.py")
