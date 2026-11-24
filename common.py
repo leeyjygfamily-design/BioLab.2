@@ -5,11 +5,28 @@ NAMES = ("DNA 분석", "BCA 단백질 정량", "PCR 프라이머 분석", "AI �
 
 def style():
     st.markdown("""<style>
-    .block-container {max-width: 1200px; padding-top: 2.5rem;}
+    .block-container {max-width: 1440px; padding: 2.2rem 2.8rem 4rem;}
+    [data-testid="stSidebar"] {border-right:1px solid #dbe3ec;}
+    [data-testid="stSidebarNav"] {padding-top:.5rem;}
+    [data-testid="stSidebarNav"] a {border-radius:4px; font-size:.9rem;}
+    [data-testid="stSidebarNav"] a[aria-current="page"] {background:#dce9fa; color:#174a91; font-weight:600;}
+    h1 {font-size:1.85rem !important; font-weight:650 !important; letter-spacing:-.035em;}
+    h2 {font-size:1.25rem !important; font-weight:600 !important;}
+    h3 {font-size:1.05rem !important; font-weight:600 !important;}
     h1,h2,h3,[data-testid="stMetricLabel"] {overflow-wrap:anywhere;}
-    @media(max-width: 640px) {
-      .block-container {padding-left: 1rem; padding-right: 1rem;}
-      h1 {font-size: 1.7rem !important;}
+    [data-testid="stCaptionContainer"] {color:#596b80;}
+    [data-testid="stButton"] button, [data-testid="stDownloadButton"] button, [data-testid="stFormSubmitButton"] button {border-radius:4px; font-weight:500;}
+    [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea {border-radius:4px;}
+    [data-testid="stTextArea"] textarea {font-family:ui-monospace, monospace; font-size:.86rem;}
+    [data-testid="stExpander"] details, [data-testid="stForm"] {border-radius:5px; border-color:#dbe3ec;}
+    [data-testid="stMetricValue"] {font-size:1.65rem; font-weight:600; font-variant-numeric:tabular-nums;}
+    [data-testid="stMetric"] {border-left:2px solid #dbe3ec; padding-left:14px;}
+    [data-testid="stTabs"] [role="tab"] {font-size:.9rem; font-weight:500;}
+    [data-testid="stPageLink"] a {border-radius:4px; color:#245ca6;}
+    [data-testid="stChatMessage"] {border-radius:5px;}
+    @media(max-width:640px) {
+      .block-container {padding:1.5rem 1rem 3rem;}
+      h1 {font-size:1.5rem !important;}
       [data-testid="stHorizontalBlock"] {flex-wrap:wrap;}
       [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {flex:1 1 100% !important; min-width:0 !important;}
       [data-testid="stButton"] button {white-space:normal;}
